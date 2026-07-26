@@ -1,0 +1,37 @@
+import ctypes
+import os
+import subprocess
+import sys
+
+
+def fail(message):
+    ctypes.windll.user32.MessageBoxW(
+        None,
+        message,
+        "FiveM Farming",
+        0x10,
+    )
+
+
+def main():
+    app_dir = os.getcwd()
+    pythonw = os.path.join(app_dir, "templates", "_runtime", "pythonw.exe")
+    macro = os.path.join(app_dir, "templates", "_app", "gui_macro.py")
+
+    if not os.path.isfile(pythonw):
+        fail("ไม่พบ Python Runtime กรุณาเปิด Launcher เพื่ออัปเดตใหม่")
+        return 1
+    if not os.path.isfile(macro):
+        fail("ไม่พบไฟล์มาโคร กรุณาเปิด Launcher เพื่ออัปเดตใหม่")
+        return 1
+
+    subprocess.Popen(
+        [pythonw, macro],
+        cwd=app_dir,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
