@@ -25,6 +25,7 @@ exe = EXE(
     a.datas,
     [],
     name="FiveM-Farming-Launcher",
+    icon=["app-icon.ico"],
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
