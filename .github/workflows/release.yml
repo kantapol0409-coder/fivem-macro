@@ -43,7 +43,7 @@ jobs:
             "Lib/site-packages"
             "import site"
           ) | Set-Content "$runtime\python312._pth" -Encoding ascii
-          python -m pip install --target "$runtime\Lib\site-packages" PySide6 keyboard numpy opencv-python pywin32
+          python -m pip install --target "$runtime\Lib\site-packages" PySide6 certifi keyboard numpy opencv-python pywin32
 
       - name: Create update package and manifest
         id: package

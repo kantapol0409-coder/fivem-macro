@@ -116,6 +116,11 @@ class UpdateWorker(QThread):
                         target = os.path.join(APP_DIR, name)
                         if not os.path.exists(source):
                             continue
+                        # Keep each PC's selected diamond mode, regions and
+                        # thresholds across updates. New config keys still get
+                        # safe defaults from gui_macro.py when absent.
+                        if name == "config.json" and os.path.isfile(target):
+                            continue
                         if os.path.isdir(source):
                             if os.path.isdir(target):
                                 shutil.rmtree(target)

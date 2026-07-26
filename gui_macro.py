@@ -3,6 +3,8 @@ import os
 import time
 import ctypes
 import json
+import ssl
+import urllib.request
 import numpy as np
 import cv2
 import win32gui
@@ -10,6 +12,12 @@ import win32ui
 import win32con
 import win32api
 import keyboard
+
+try:
+    import certifi
+    HTTPS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except Exception:
+    HTTPS_CONTEXT = ssl.create_default_context()
 
 # Keep Qt screen coordinates, Win32 window coordinates, and captured pixels in
 # the same (physical-pixel) coordinate space.  Without this, Windows display
@@ -26,7 +34,8 @@ from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QPoint, QRect
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QSlider, QTextEdit, QFrame, QGridLayout, 
-    QGroupBox, QSystemTrayIcon, QMenu, QCheckBox, QTabWidget, QScrollArea
+    QGroupBox, QSystemTrayIcon, QMenu, QCheckBox, QTabWidget, QScrollArea,
+    QComboBox, QLineEdit
 )
 from PySide6.QtGui import QIcon, QAction, QColor, QFont, QPainter, QPen, QPixmap, QImage
 
@@ -207,6 +216,12 @@ class MacroWorker(QThread):
         self.last_diamond_check_time = 0.0
         self.last_diamond_storage_time = 0.0
         self.diamond_pass_streak = 0
+        self.diamond_full_streak = 0
+        self.diamond_full_notified = False
+        self.diamond_cycle_started_at = time.time()
+        self.diamond_mode = "car_timer"
+        self.diamond_interval_minutes = 20
+        self.discord_webhook_url = ""
         self.auto_feed_enabled = True
         self.auto_store_enabled = True
         self.reference_resolution = None
@@ -237,8 +252,47 @@ class MacroWorker(QThread):
         elif config_type == "toggle":
             if key == "auto_feed": self.auto_feed_enabled = value
             elif key == "auto_store": self.auto_store_enabled = value
+        elif config_type == "diamond":
+            if key == "mode": self.diamond_mode = str(value)
+            elif key == "interval":
+                self.diamond_interval_minutes = max(1, int(value))
+            elif key == "webhook":
+                self.discord_webhook_url = str(value or "").strip()
         elif config_type == "ref_res": self.reference_resolution = value
         elif config_type == "template_refs": self.template_reference_sizes = value or {}
+
+    def reset_diamond_cycle(self):
+        self.diamond_cycle_started_at = time.time()
+        self.diamond_full_streak = 0
+
+    def send_diamond_full_webhook(self):
+        if not self.discord_webhook_url:
+            self.log_signal.emit("[Discord] เพชรเต็ม 40/40 แต่ยังไม่ได้ตั้งค่า Webhook")
+            return
+        machine_name = os.environ.get("COMPUTERNAME", "Unknown PC")
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        payload = json.dumps({
+            "username": "FiveM Farming",
+            "content": f"💎 เพชรเต็ม 40/40\\nเครื่อง: {machine_name}\\nเวลา: {timestamp}"
+        }, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            self.discord_webhook_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "FiveM-Farming/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                request, timeout=10, context=HTTPS_CONTEXT
+            ) as response:
+                if response.status not in (200, 204):
+                    raise RuntimeError(f"Discord HTTP {response.status}")
+            self.log_signal.emit("[Discord] แจ้งเตือนเพชรเต็ม 40/40 สำเร็จ")
+        except Exception as error:
+            self.log_signal.emit(f"[Discord] ส่งแจ้งเตือนไม่สำเร็จ: {type(error).__name__}: {error}")
 
     def get_client_geometry(self, hwnd=None):
         """Return the game client origin on screen and its pixel size."""
@@ -740,7 +794,10 @@ class MacroWorker(QThread):
             # The match centre can move slightly when the diamond artwork is
             # re-cropped.  Keep enough of the slot's upper half so the count is
             # not clipped to only its first four pixel rows.
-            num_h = max(10, int(h * 0.40))
+            # Keep only the thin counter strip.  Using 40% of the slot also
+            # included the bright diamond artwork below the text; its columns
+            # merged with the first digit and made valid 31/40–39/40 fail.
+            num_h = max(12, int(h * 0.20))
             num_w = max(12, int(w * 0.68))
             num_area = slot_img[:num_h, w - num_w:]
             gray = cv2.cvtColor(num_area, cv2.COLOR_BGR2GRAY)
@@ -941,6 +998,95 @@ class MacroWorker(QThread):
             slot_img = np.zeros((10, 10, 3), dtype=np.uint8)
             self.diamond_preview_signal.emit(slot_img, val, False, "ไม่พบรูปเพชรในกระเป๋า")
 
+    def check_and_run_timed_diamond_store(self):
+        """Store any detected diamonds when the configured timer is due."""
+        bg_img = self.capture_background(self.hwnd)
+        if bg_img is None:
+            return
+        h_img, w_img = bg_img.shape[:2]
+        scaled_bag = self.get_scaled_region(self.bag_region)
+        default_x = (scaled_bag[0] / w_img, (scaled_bag[0] + scaled_bag[2]) / w_img) if scaled_bag else (0.33, 0.85)
+        default_y = (scaled_bag[1] / h_img, (scaled_bag[1] + scaled_bag[3]) / h_img) if scaled_bag else (0.0, 1.0)
+        dia_x, dia_y = self.get_region_ranges(
+            self.diamond_search_region, w_img, h_img, default_x, default_y
+        )
+        diamond_result = self.find_image(
+            bg_img, "templates/diamond_icon.png", 0.86,
+            x_range=dia_x, y_range=dia_y
+        )
+        elapsed = time.time() - self.diamond_cycle_started_at
+        interval_seconds = self.diamond_interval_minutes * 60
+        remaining = max(0, int(interval_seconds - elapsed))
+        if diamond_result and diamond_result[0] is not None:
+            dx, dy, val = diamond_result
+            preview_size = 76
+            x0, x1 = max(0, dx - preview_size // 2), min(w_img, dx + preview_size // 2)
+            y0, y1 = max(0, dy - preview_size // 2), min(h_img, dy + preview_size // 2)
+            slot_img = bg_img[y0:y1, x0:x1]
+            if elapsed >= interval_seconds:
+                self.diamond_preview_signal.emit(
+                    slot_img, val, True,
+                    f"ครบ {self.diamond_interval_minutes} นาที กำลังเก็บเพชรเข้ารถ"
+                )
+                self.diamond_cycle_started_at = time.time()
+                self.execute_store_diamonds_sequence()
+            else:
+                self.diamond_preview_signal.emit(
+                    slot_img, val, False,
+                    f"โหมดจับเวลา: เหลือ {remaining // 60}:{remaining % 60:02d} นาที"
+                )
+        else:
+            val = diamond_result[2] if diamond_result else 0.0
+            self.diamond_preview_signal.emit(
+                np.zeros((10, 10, 3), dtype=np.uint8),
+                val, False,
+                f"โหมดจับเวลา: ยังไม่พบเพชร (เหลือ {remaining // 60}:{remaining % 60:02d} นาที)"
+            )
+
+    def check_and_run_no_car_full_mode(self):
+        """Stop and notify once after confirming the exact 40/40 capture."""
+        bg_img = self.capture_background(self.hwnd)
+        if bg_img is None:
+            return
+        h_img, w_img = bg_img.shape[:2]
+        scaled_bag = self.get_scaled_region(self.bag_region)
+        default_x = (scaled_bag[0] / w_img, (scaled_bag[0] + scaled_bag[2]) / w_img) if scaled_bag else (0.33, 0.85)
+        default_y = (scaled_bag[1] / h_img, (scaled_bag[1] + scaled_bag[3]) / h_img) if scaled_bag else (0.0, 1.0)
+        dia_x, dia_y = self.get_region_ranges(
+            self.diamond_search_region, w_img, h_img, default_x, default_y
+        )
+        full_result = self.find_image(
+            bg_img, "templates/diamond_full.png", 0.88,
+            x_range=dia_x, y_range=dia_y
+        )
+        if full_result and full_result[0] is not None:
+            dx, dy, val = full_result
+            template = cv2.imread(self.resolve_template_path("templates/diamond_full.png"))
+            th, tw = template.shape[:2] if template is not None else (86, 86)
+            x0, x1 = max(0, dx - tw // 2), min(w_img, dx + tw // 2)
+            y0, y1 = max(0, dy - th // 2), min(h_img, dy + th // 2)
+            slot_img = bg_img[y0:y1, x0:x1]
+            self.diamond_full_streak += 1
+            confirmed = self.diamond_full_streak >= 2
+            status = "พบ 40/40 กำลังยืนยันภาพซ้ำ"
+            if confirmed:
+                status = "เพชรเต็ม 40/40 — หยุดฟาร์มแล้ว"
+            self.diamond_preview_signal.emit(slot_img, val, confirmed, status)
+            if confirmed and not self.diamond_full_notified:
+                self.diamond_full_notified = True
+                self.is_running = False
+                self.running_state_signal.emit(False)
+                self.log_signal.emit("[ระบบเพชร] ตรวจพบ 40/40 หยุดฟาร์มโหมดไม่มีรถ")
+                self.send_diamond_full_webhook()
+        else:
+            self.diamond_full_streak = 0
+            self.diamond_full_notified = False
+            val = full_result[2] if full_result else 0.0
+            self.diamond_preview_signal.emit(
+                np.zeros((10, 10, 3), dtype=np.uint8),
+                val, False, "โหมดไม่มีรถ: รอเพชรเต็ม 40/40"
+            )
+
     def run(self):
         while not self.is_exiting:
             try:
@@ -992,7 +1138,6 @@ class MacroWorker(QThread):
                             self.match_signal.emit(match_status)
                             self.bg_click(self.hwnd, x_conf, y_conf)
                             time.sleep(self.delays["confirm"])
-                            if self.auto_store_enabled: self.check_and_run_store_diamonds(trigger_storage=True)
                     continue
                 else:
                     match_status["all"], match_status["confirm"] = (False, all_result[2] if all_result else 0.0), (False, 0.0)
@@ -1059,10 +1204,10 @@ class MacroWorker(QThread):
 
                 if self.auto_store_enabled and time.time() - self.last_diamond_check_time > 5.0:
                     self.last_diamond_check_time = time.time()
-                    # This periodic check used to update only the preview, so a
-                    # valid >=30 count never started the trunk sequence unless
-                    # it happened immediately after destroying gold.
-                    self.check_and_run_store_diamonds(trigger_storage=True)
+                    if self.diamond_mode == "no_car_full":
+                        self.check_and_run_no_car_full_mode()
+                    else:
+                        self.check_and_run_timed_diamond_store()
 
                 self.match_signal.emit(match_status)
                 time.sleep(0.3)
@@ -1087,7 +1232,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.config_path = get_writable_path("config.json")
+        self.private_settings_path = get_writable_path("private-settings.json")
         self.load_config()
+        self.load_private_settings()
         self.setWindowTitle("ระบบมาโครทิ้งทองอัตโนมัติ (Background)")
         self.resize(760, 580)
         self.setStyleSheet("""
@@ -1210,11 +1357,25 @@ class MainWindow(QMainWindow):
         self.auto_feed_cb = QCheckBox("ระบบกินข้าว/น้ำอัตโนมัติ")
         self.auto_feed_cb.setChecked(self.auto_feed_enabled)
         self.auto_feed_cb.toggled.connect(self.on_auto_feed_toggled)
-        self.auto_store_cb = QCheckBox("ระบบเก็บเพชรใส่ท้ายรถอัตโนมัติ")
+        self.auto_store_cb = QCheckBox("เปิดระบบจัดการเพชรอัตโนมัติ")
         self.auto_store_cb.setChecked(self.auto_store_enabled)
         self.auto_store_cb.toggled.connect(self.on_auto_store_toggled)
+        self.diamond_mode_combo = QComboBox()
+        self.diamond_mode_combo.addItem("มีรถ: เก็บเพชรทุก 20 นาที", "car_timer")
+        self.diamond_mode_combo.addItem("ไม่มีรถ: เต็ม 40/40 แล้วหยุด + แจ้ง Discord", "no_car_full")
+        mode_index = self.diamond_mode_combo.findData(self.diamond_mode)
+        self.diamond_mode_combo.setCurrentIndex(max(0, mode_index))
+        self.diamond_mode_combo.currentIndexChanged.connect(self.on_diamond_mode_changed)
+        self.webhook_input = QLineEdit()
+        self.webhook_input.setEchoMode(QLineEdit.Password)
+        self.webhook_input.setPlaceholderText("Discord Webhook (เก็บเฉพาะเครื่องนี้)")
+        self.webhook_input.setText(self.discord_webhook_url)
+        self.webhook_input.editingFinished.connect(self.on_webhook_edited)
         toggle_layout.addWidget(self.auto_feed_cb)
         toggle_layout.addWidget(self.auto_store_cb)
+        toggle_layout.addWidget(QLabel("โหมดเพชร:"))
+        toggle_layout.addWidget(self.diamond_mode_combo)
+        toggle_layout.addWidget(self.webhook_input)
         config_tab_layout.addWidget(toggle_box)
 
         # Tab 2: Custom Crops
@@ -1402,6 +1563,7 @@ class MainWindow(QMainWindow):
         self.worker.hud_preview_signal.connect(self.update_hud_preview)
         self.worker.gold_preview_signal.connect(self.update_gold_preview)
         self.worker.diamond_preview_signal.connect(self.update_diamond_preview)
+        self.worker.running_state_signal.connect(self.on_worker_running_state)
         self.worker.start()
 
         keyboard.add_hotkey("F9", self.toggle_macro)
@@ -1427,6 +1589,9 @@ class MainWindow(QMainWindow):
         self.worker.set_config("thirst", "limit", self.thirst_limit)
         self.worker.set_config("auto_feed", "toggle", self.auto_feed_enabled)
         self.worker.set_config("auto_store", "toggle", self.auto_store_enabled)
+        self.worker.set_config("mode", "diamond", self.diamond_mode)
+        self.worker.set_config("interval", "diamond", self.diamond_interval_minutes)
+        self.worker.set_config("webhook", "diamond", self.discord_webhook_url)
         self.worker.set_config("ref_res", "ref_res", self.reference_resolution)
         self.worker.set_config("template_refs", "template_refs", self.template_reference_sizes)
 
@@ -1490,11 +1655,22 @@ class MainWindow(QMainWindow):
     def toggle_macro(self):
         self.worker.is_running = not self.worker.is_running
         if self.worker.is_running:
+            self.worker.reset_diamond_cycle()
             self.start_btn.setText("หยุดทำงานบอทชั่วคราว [F9]")
             self.start_btn.setProperty("running", "true")
         else:
             self.start_btn.setText("เริ่มทำงานบอท [F9]")
             self.start_btn.setProperty("running", "false")
+        self.start_btn.style().unpolish(self.start_btn)
+        self.start_btn.style().polish(self.start_btn)
+
+    @Slot(bool)
+    def on_worker_running_state(self, running):
+        self.worker.is_running = running
+        self.start_btn.setText(
+            "หยุดทำงานบอทชั่วคราว [F9]" if running else "เริ่มทำงานบอท [F9]"
+        )
+        self.start_btn.setProperty("running", "true" if running else "false")
         self.start_btn.style().unpolish(self.start_btn)
         self.start_btn.style().polish(self.start_btn)
 
@@ -1544,6 +1720,9 @@ class MainWindow(QMainWindow):
         self.confirm_trunk_search_region = None
         self.hunger_limit, self.thirst_limit = 20, 20
         self.auto_feed_enabled, self.auto_store_enabled = True, True
+        self.diamond_mode = "car_timer"
+        self.diamond_interval_minutes = 20
+        self.discord_webhook_url = ""
         self.reference_resolution = None
         self.template_reference_sizes = {}
         if os.path.exists(self.config_path):
@@ -1570,6 +1749,8 @@ class MainWindow(QMainWindow):
                     self.thirst_limit = data.get("thirst_limit", 20)
                     self.auto_feed_enabled = data.get("auto_feed_enabled", True)
                     self.auto_store_enabled = data.get("auto_store_enabled", True)
+                    self.diamond_mode = data.get("diamond_mode", "car_timer")
+                    self.diamond_interval_minutes = int(data.get("diamond_interval_minutes", 20))
                     self.reference_resolution = data.get("reference_resolution", None)
                     self.template_reference_sizes = data.get("template_reference_sizes", {})
             except Exception: pass
@@ -1591,12 +1772,48 @@ class MainWindow(QMainWindow):
                 "confirm_trunk_search_region": self.confirm_trunk_search_region,
                 "hunger_limit": self.hunger_limit, "thirst_limit": self.thirst_limit,
                 "auto_feed_enabled": self.auto_feed_enabled, "auto_store_enabled": self.auto_store_enabled,
+                "diamond_mode": self.diamond_mode,
+                "diamond_interval_minutes": self.diamond_interval_minutes,
                 "reference_resolution": self.reference_resolution,
                 "template_reference_sizes": self.template_reference_sizes
             }
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
         except Exception: pass
+
+    def load_private_settings(self):
+        try:
+            if os.path.exists(self.private_settings_path):
+                with open(self.private_settings_path, "r", encoding="utf-8") as stream:
+                    private_data = json.load(stream)
+                self.discord_webhook_url = str(
+                    private_data.get("discord_webhook_url", "")
+                ).strip()
+                self.diamond_mode = str(
+                    private_data.get("diamond_mode", self.diamond_mode)
+                )
+                self.diamond_interval_minutes = int(
+                    private_data.get(
+                        "diamond_interval_minutes",
+                        self.diamond_interval_minutes
+                    )
+                )
+        except Exception:
+            self.discord_webhook_url = ""
+
+    def save_private_settings(self):
+        try:
+            with open(self.private_settings_path, "w", encoding="utf-8") as stream:
+                json.dump(
+                    {
+                        "discord_webhook_url": self.discord_webhook_url,
+                        "diamond_mode": self.diamond_mode,
+                        "diamond_interval_minutes": self.diamond_interval_minutes,
+                    },
+                    stream, indent=2, ensure_ascii=False
+                )
+        except Exception:
+            pass
 
     def get_region_text(self, region):
         if not region: return "ยังไม่ได้ตั้งค่า"
@@ -1827,6 +2044,18 @@ class MainWindow(QMainWindow):
         self.auto_store_enabled = checked
         self.worker.set_config("auto_store", "toggle", checked)
         self.save_config()
+
+    def on_diamond_mode_changed(self, _index=None):
+        self.diamond_mode = str(self.diamond_mode_combo.currentData())
+        self.worker.set_config("mode", "diamond", self.diamond_mode)
+        self.worker.reset_diamond_cycle()
+        self.save_config()
+        self.save_private_settings()
+
+    def on_webhook_edited(self):
+        self.discord_webhook_url = self.webhook_input.text().strip()
+        self.worker.set_config("webhook", "diamond", self.discord_webhook_url)
+        self.save_private_settings()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
