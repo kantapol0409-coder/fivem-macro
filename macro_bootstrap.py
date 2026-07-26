@@ -30,9 +30,12 @@ def main():
     # Keep the unchanged macro beside config.json and templates, exactly like
     # the working setup on the main PC.
     shutil.copy2(packaged_macro, macro)
+    child_env = os.environ.copy()
+    child_env["FIVEM_CAPTURE_WINDOW_DC"] = "1"
     subprocess.Popen(
         [pythonw, macro],
         cwd=app_dir,
+        env=child_env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     return 0

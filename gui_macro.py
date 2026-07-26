@@ -310,7 +310,13 @@ class MacroWorker(QThread):
         width, height = geometry[2], geometry[3]
         hwindc = srcdc = memdc = bmp = None
         try:
-            hwindc = win32gui.GetDC(hwnd)
+            # Portable/chicken PCs use the same window DC capture path as the
+            # older build that was proven stable on those machines. The main
+            # PC keeps the current client DC path.
+            if os.environ.get("FIVEM_CAPTURE_WINDOW_DC") == "1":
+                hwindc = win32gui.GetWindowDC(hwnd)
+            else:
+                hwindc = win32gui.GetDC(hwnd)
             srcdc = win32ui.CreateDCFromHandle(hwindc)
             memdc = srcdc.CreateCompatibleDC()
             bmp = win32ui.CreateBitmap()
