@@ -2,11 +2,13 @@ import hashlib
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import urllib.request
 import zipfile
+import certifi
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QMessageBox, QProgressBar, QVBoxLayout, QWidget
 
@@ -19,6 +21,7 @@ APP_EXE = "FiveM-Farming-Macro.exe"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "FiveM-Farming")
 VERSION_FILE = os.path.join(APP_DIR, ".installed-version.json")
 USER_AGENT = "FiveM-Farming-Launcher/1.0"
+HTTPS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 
 def request_bytes(url, timeout=30):
@@ -29,7 +32,7 @@ def request_bytes(url, timeout=30):
             "Accept": "application/vnd.github+json",
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout, context=HTTPS_CONTEXT) as response:
         return response.read()
 
 

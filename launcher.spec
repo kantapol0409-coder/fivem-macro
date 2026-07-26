@@ -1,10 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
+certifi_data = collect_data_files("certifi")
+
 a = Analysis(
     ["launcher.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=certifi_data,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
