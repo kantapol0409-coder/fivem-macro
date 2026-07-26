@@ -31,7 +31,7 @@ def main():
     # the working setup on the main PC.
     shutil.copy2(packaged_macro, macro)
     child_env = os.environ.copy()
-    child_env["FIVEM_CAPTURE_WINDOW_DC"] = "1"
+    child_env["FIVEM_CAPTURE_BITBLT"] = "1"
     subprocess.Popen(
         [pythonw, macro],
         cwd=app_dir,

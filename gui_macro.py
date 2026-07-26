@@ -310,10 +310,11 @@ class MacroWorker(QThread):
         width, height = geometry[2], geometry[3]
         hwindc = srcdc = memdc = bmp = None
         try:
-            # Portable/chicken PCs use the same window DC capture path as the
-            # older build that was proven stable on those machines. The main
-            # PC keeps the current client DC path.
-            if os.environ.get("FIVEM_CAPTURE_WINDOW_DC") == "1":
+            # Chicken PCs use the BitBlt capture backend proven by the supplied
+            # non-flickering macro. The main PC keeps its current PrintWindow
+            # backend unchanged.
+            use_bitblt = os.environ.get("FIVEM_CAPTURE_BITBLT") == "1"
+            if use_bitblt:
                 hwindc = win32gui.GetWindowDC(hwnd)
             else:
                 hwindc = win32gui.GetDC(hwnd)
@@ -322,7 +323,17 @@ class MacroWorker(QThread):
             bmp = win32ui.CreateBitmap()
             bmp.CreateCompatibleBitmap(srcdc, width, height)
             memdc.SelectObject(bmp)
-            result = ctypes.windll.user32.PrintWindow(hwnd, memdc.GetSafeHdc(), 3)
+            if use_bitblt:
+                memdc.BitBlt(
+                    (0, 0),
+                    (width, height),
+                    srcdc,
+                    (0, 0),
+                    win32con.SRCCOPY,
+                )
+                result = 1
+            else:
+                result = ctypes.windll.user32.PrintWindow(hwnd, memdc.GetSafeHdc(), 3)
             if not result:
                 return None
             bmpinfo = bmp.GetInfo()
