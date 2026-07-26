@@ -205,6 +205,8 @@ class MacroWorker(QThread):
         self.force_store_test = False
         self.last_hud_check_time = 0.0
         self.last_diamond_check_time = 0.0
+        self.last_diamond_storage_time = 0.0
+        self.diamond_pass_streak = 0
         self.auto_feed_enabled = True
         self.auto_store_enabled = True
         self.reference_resolution = None
@@ -870,7 +872,11 @@ class MacroWorker(QThread):
         default_x = (scaled_bag[0]/w_img, (scaled_bag[0]+scaled_bag[2])/w_img) if scaled_bag else (0.33, 0.85)
         default_y = (scaled_bag[1]/h_img, (scaled_bag[1]+scaled_bag[3])/h_img) if scaled_bag else (0.0, 1.0)
         dia_x, dia_y = self.get_region_ranges(self.diamond_search_region, w_img, h_img, default_x, default_y)
-        diamond_result = self.find_image(bg_img, "templates/diamond_icon.png", 0.70, x_range=dia_x, y_range=dia_y)
+        # A 70% match is not specific enough for the small inventory artwork:
+        # orange medicine bottles can reach ~70% and previously triggered the
+        # complete trunk sequence. Real diamond captures are consistently
+        # around 90%, so require a high-confidence icon match.
+        diamond_result = self.find_image(bg_img, "templates/diamond_icon.png", 0.86, x_range=dia_x, y_range=dia_y)
         if diamond_result and diamond_result[0] is not None:
             dx, dy, val = diamond_result
             # Load template to get actual dimensions for proper slot extraction
@@ -896,10 +902,24 @@ class MacroWorker(QThread):
                 passed = self.check_diamonds_exceed_30(slot_img)
                 if passed:
                     status_str = "ผ่านเกณฑ์ >= 30 เม็ด (เตรียมเก็บของ)"
-            self.diamond_preview_signal.emit(slot_img, val, passed, status_str)
-            if passed and trigger_storage:
-                self.execute_store_diamonds_sequence()
+            if passed:
+                self.diamond_pass_streak += 1
+            else:
+                self.diamond_pass_streak = 0
+            confirmed = passed and self.diamond_pass_streak >= 2
+            if passed and not confirmed:
+                status_str = "พบเพชร >= 30 เม็ด กำลังยืนยันภาพซ้ำก่อนเก็บ"
+            self.diamond_preview_signal.emit(slot_img, val, confirmed, status_str)
+            if confirmed and trigger_storage:
+                now = time.time()
+                # Never repeat the long storage sequence continuously when the
+                # inventory has not changed or a prior storage attempt failed.
+                if now - self.last_diamond_storage_time >= 120.0:
+                    self.last_diamond_storage_time = now
+                    self.diamond_pass_streak = 0
+                    self.execute_store_diamonds_sequence()
         else:
+            self.diamond_pass_streak = 0
             val = diamond_result[2] if diamond_result else 0.0
             slot_img = np.zeros((10, 10, 3), dtype=np.uint8)
             self.diamond_preview_signal.emit(slot_img, val, False, "ไม่พบรูปเพชรในกระเป๋า")
@@ -1472,7 +1492,7 @@ class MainWindow(QMainWindow):
             if slot_crop.size > 100:
                 h, w, c = slot_crop.shape
                 self.lbl_diamond_slot.setPixmap(QPixmap.fromImage(QImage(slot_crop.tobytes(), w, h, c*w, QImage.Format_BGR888)).scaled(self.lbl_diamond_slot.width(), self.lbl_diamond_slot.height(), Qt.KeepAspectRatio))
-            self.lbl_diamond_score.setText(f"ความเหมือนรูปเพชร: {match_score*100:.1f}% (เกณฑ์: 70.0%)")
+            self.lbl_diamond_score.setText(f"ความเหมือนรูปเพชร: {match_score*100:.1f}% (เกณฑ์: 86.0%)")
             self.lbl_diamond_status.setText(f"สถานะ: {status_str}")
         except Exception: pass
 
