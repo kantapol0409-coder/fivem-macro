@@ -1,0 +1,90 @@
+{
+    "thresholds": {
+        "gold": 0.84,
+        "destroy": 0.75,
+        "all": 0.65,
+        "confirm": 0.65
+    },
+    "delays": {
+        "gold": 0.8,
+        "destroy": 0.8,
+        "all": 0.5,
+        "confirm": 8.0
+    },
+    "hud_region": [
+        218,
+        837,
+        74,
+        35
+    ],
+    "auto_farm_region": [
+        704,
+        519,
+        93,
+        32
+    ],
+    "bag_region": [
+        674,
+        257,
+        632,
+        451
+    ],
+    "gold_search_region": [
+        534,
+        256,
+        621,
+        450
+    ],
+    "destroy_search_region": [
+        538,
+        257,
+        669,
+        445
+    ],
+    "all_search_region": [
+        845,
+        480,
+        45,
+        30
+    ],
+    "confirm_search_region": [
+        771,
+        527,
+        57,
+        18
+    ],
+    "diamond_search_region": [
+        537,
+        256,
+        626,
+        448
+    ],
+    "diamond_trunk_search_region": [
+        672,
+        258,
+        633,
+        448
+    ],
+    "trunk_ready_search_region": null,
+    "all_trunk_search_region": [
+        843,
+        479,
+        50,
+        32
+    ],
+    "confirm_trunk_search_region": [
+        773,
+        527,
+        52,
+        19
+    ],
+    "hunger_limit": 10,
+    "thirst_limit": 10,
+    "auto_feed_enabled": true,
+    "auto_store_enabled": true,
+    "reference_resolution": [
+        1600,
+        900
+    ],
+    "template_reference_sizes": {}
+}

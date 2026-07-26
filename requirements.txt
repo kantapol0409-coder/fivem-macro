@@ -1,0 +1,6 @@
+PySide6
+keyboard
+numpy
+opencv-python
+pywin32
+pyinstaller

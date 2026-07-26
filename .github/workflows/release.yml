@@ -1,0 +1,59 @@
+name: Build and release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - version.json
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Build applications
+        run: |
+          pyinstaller --noconfirm fivem_macro.spec
+          pyinstaller --noconfirm launcher.spec
+
+      - name: Create update package and manifest
+        id: package
+        shell: pwsh
+        run: |
+          $version = (Get-Content version.json -Raw | ConvertFrom-Json).version
+          New-Item -ItemType Directory -Force release-package | Out-Null
+          Copy-Item dist\FiveM-Farming-Macro.exe release-package\
+          Copy-Item config.json release-package\
+          Copy-Item templates release-package\templates -Recurse
+          Compress-Archive -Path release-package\* -DestinationPath dist\FiveM-Farming-Package.zip -Force
+          $hash = (Get-FileHash dist\FiveM-Farming-Package.zip -Algorithm SHA256).Hash.ToLower()
+          @{
+            version = $version
+            package = "FiveM-Farming-Package.zip"
+            package_sha256 = $hash
+          } | ConvertTo-Json | Set-Content dist\release-manifest.json -Encoding utf8
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.package.outputs.version }}
+          name: FiveM Farming v${{ steps.package.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/FiveM-Farming-Launcher.exe
+            dist/FiveM-Farming-Package.zip
+            dist/release-manifest.json

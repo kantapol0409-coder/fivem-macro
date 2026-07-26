@@ -1,0 +1,13 @@
+build/
+dist/
+__pycache__/
+*.pyc
+*.log
+debug_*.png
+.installed-version.json
+assets-stage/
+assets_bundle/
+assets_bundle.zip
+local-release/
+source/
+templates_b64/
