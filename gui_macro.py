@@ -236,6 +236,8 @@ class MacroWorker(QThread):
         self.run_generation += 1
         self.is_running = bool(running)
         if not self.is_running:
+            self.force_feed_test = False
+            self.force_store_test = False
             try:
                 release_key_hold("e")
             except Exception:
@@ -2099,10 +2101,14 @@ class MainWindow(QMainWindow):
         self.save_config()
 
     def test_feed_sequence(self):
-        if self.worker.hwnd: self.worker.force_feed_test = True
+        self.worker.force_feed_test = True
+        if not self.worker.is_running:
+            self.toggle_macro()
 
     def test_store_sequence(self):
-        if self.worker.hwnd: self.worker.force_store_test = True
+        self.worker.force_store_test = True
+        if not self.worker.is_running:
+            self.toggle_macro()
 
     def on_auto_feed_toggled(self, checked):
         self.auto_feed_enabled = checked
