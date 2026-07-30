@@ -194,6 +194,7 @@ class MacroWorker(QThread):
         self.is_running = False
         self.is_exiting = False
         self.run_generation = 0
+        self.last_cancelled_generation = -1
         self.hwnd = None
         self.thresholds = {"gold": 0.84, "destroy": 0.75, "all": 0.65, "confirm": 0.65}
         self.delays = {"gold": 0.8, "destroy": 0.8, "all": 0.8, "confirm": 8.0}
@@ -257,9 +258,18 @@ class MacroWorker(QThread):
         deadline = time.monotonic() + max(0.0, float(seconds))
         while time.monotonic() < deadline:
             if not self.should_continue(token):
+                if (
+                    not self.is_exiting
+                    and self.last_cancelled_generation != self.run_generation
+                ):
+                    self.last_cancelled_generation = self.run_generation
+                    self.log_signal.emit(
+                        "[ระบบ] หยุดแล้ว — ยกเลิกคำสั่งเบื้องหลังที่กำลังทำทั้งหมด"
+                    )
                 return False
             time.sleep(min(step, max(0.0, deadline - time.monotonic())))
         return self.should_continue(token)
+
 
     def set_config(self, key, config_type, value):
         if config_type == "threshold": self.thresholds[key] = value
