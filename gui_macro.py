@@ -193,6 +193,7 @@ class MacroWorker(QThread):
         super().__init__()
         self.is_running = False
         self.is_exiting = False
+        self.run_generation = 0
         self.hwnd = None
         self.thresholds = {"gold": 0.84, "destroy": 0.75, "all": 0.65, "confirm": 0.65}
         self.delays = {"gold": 0.8, "destroy": 0.8, "all": 0.8, "confirm": 8.0}
@@ -229,6 +230,34 @@ class MacroWorker(QThread):
         self.last_runtime_error = ""
         self.last_runtime_error_time = 0.0
         self.last_gold_debug_capture_time = 0.0
+
+    def set_running(self, running):
+        """Change run state and immediately invalidate in-flight actions."""
+        self.run_generation += 1
+        self.is_running = bool(running)
+        if not self.is_running:
+            try:
+                release_key_hold("e")
+            except Exception:
+                pass
+
+    def action_token(self):
+        return self.run_generation
+
+    def should_continue(self, token):
+        return (
+            not self.is_exiting
+            and self.is_running
+            and token == self.run_generation
+        )
+
+    def interruptible_wait(self, seconds, token, step=0.05):
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while time.monotonic() < deadline:
+            if not self.should_continue(token):
+                return False
+            time.sleep(min(step, max(0.0, deadline - time.monotonic())))
+        return self.should_continue(token)
 
     def set_config(self, key, config_type, value):
         if config_type == "threshold": self.thresholds[key] = value
@@ -694,25 +723,31 @@ class MacroWorker(QThread):
         except Exception: pass
 
     def execute_feeding_sequence(self, need_food, need_water):
+        token = self.action_token()
+        if not self.should_continue(token):
+            return
         self.log_signal.emit(f"[ระบบป้อนอาหาร] เริ่มกระบวนการกิน (น้ำ: {need_water}, ข้าว: {need_food})...")
         orig_pos = self.activate_game_window()
+        if not self.should_continue(token): return
         send_key_direct("esc")
-        time.sleep(1.0)
+        if not self.interruptible_wait(1.0, token): return
         send_key_direct("x")
-        time.sleep(1.0)
+        if not self.interruptible_wait(1.0, token): return
         if need_water:
             self.log_signal.emit("[ระบบป้อนอาหาร] กำลังกินน้ำ (ช่อง 6)...")
             send_key_direct("6")
-            time.sleep(8.0)
+            if not self.interruptible_wait(8.0, token): return
         if need_food:
             self.log_signal.emit("[ระบบป้อนอาหาร] กำลังกินอาหาร (ช่อง 7)...")
             send_key_direct("7")
-            time.sleep(8.0)
+            if not self.interruptible_wait(8.0, token): return
         self.log_signal.emit("[ระบบป้อนอาหาร] กลับไปทำอาชีพ (กด E ค้าง 1.5 วินาที)...")
         press_key_hold("e")
-        time.sleep(1.5)
+        if not self.interruptible_wait(1.5, token):
+            release_key_hold("e")
+            return
         release_key_hold("e")
-        time.sleep(1.5)
+        if not self.interruptible_wait(1.5, token): return
         bg_after = self.capture_background(self.hwnd)
         if bg_after is not None:
             h_img, w_img, _ = bg_after.shape
@@ -728,14 +763,16 @@ class MacroWorker(QThread):
             if btn_result and btn_result[0] is not None:
                 bx, by, bval = btn_result
                 win32api.SetCursorPos(self.client_to_screen(bx, by))
-                time.sleep(0.1)
+                if not self.interruptible_wait(0.1, token): return
                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-                time.sleep(0.05)
+                if not self.interruptible_wait(0.05, token):
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                    return
                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                time.sleep(2.0)
+                if not self.interruptible_wait(2.0, token): return
         self.log_signal.emit("[ระบบป้อนอาหาร] กำลังเปิดกระเป๋าอีกครั้ง (ปุ่ม T)...")
         send_key_direct("t")
-        time.sleep(1.0)
+        if not self.interruptible_wait(1.0, token): return
         if orig_pos:
             try: win32api.SetCursorPos(orig_pos)
             except: pass
@@ -763,16 +800,33 @@ class MacroWorker(QThread):
         need_food, need_water = hunger_px < self.hunger_limit, thirst_px < self.thirst_limit
         if need_food or need_water: self.execute_feeding_sequence(need_food, need_water)
 
-    def double_click_at(self, abs_x, abs_y):
+    def double_click_at(self, abs_x, abs_y, token=None):
         try:
+            if token is not None and not self.should_continue(token): return
             win32api.SetCursorPos((abs_x, abs_y))
-            time.sleep(0.1)
+            if token is not None:
+                if not self.interruptible_wait(0.1, token): return
+            else:
+                time.sleep(0.1)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            time.sleep(0.05)
+            if token is not None:
+                if not self.interruptible_wait(0.05, token):
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                    return
+            else:
+                time.sleep(0.05)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-            time.sleep(0.05)
+            if token is not None:
+                if not self.interruptible_wait(0.05, token): return
+            else:
+                time.sleep(0.05)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-            time.sleep(0.05)
+            if token is not None:
+                if not self.interruptible_wait(0.05, token):
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                    return
+            else:
+                time.sleep(0.05)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
         except Exception: pass
 
@@ -856,14 +910,18 @@ class MacroWorker(QThread):
             return False
 
     def execute_store_diamonds_sequence(self):
+        token = self.action_token()
+        if not self.should_continue(token):
+            return
         self.log_signal.emit("[ระบบเก็บเพชร] เริ่มกระบวนการเก็บเพชรลงรถ...")
         orig_pos = self.activate_game_window()
+        if not self.should_continue(token): return
         send_key_direct("esc")
-        time.sleep(1.0)
+        if not self.interruptible_wait(1.0, token): return
         send_key_direct("x")
-        time.sleep(1.0)
+        if not self.interruptible_wait(1.0, token): return
         send_key_direct("h")
-        time.sleep(1.5)
+        if not self.interruptible_wait(1.5, token): return
         bg_img = self.capture_background(self.hwnd)
         if bg_img is not None:
             h_img, w_img, _ = bg_img.shape
@@ -872,8 +930,8 @@ class MacroWorker(QThread):
             if btn_ready and btn_ready[0] is not None:
                 bx, by, bval = btn_ready
                 screen_x, screen_y = self.client_to_screen(bx, by)
-                self.double_click_at(screen_x, screen_y)
-                time.sleep(4.0)
+                self.double_click_at(screen_x, screen_y, token)
+                if not self.interruptible_wait(4.0, token): return
         bg_trunk = self.capture_background(self.hwnd)
         if bg_trunk is not None:
             h_img, w_img, _ = bg_trunk.shape
@@ -887,8 +945,8 @@ class MacroWorker(QThread):
             if diamond_result and diamond_result[0] is not None:
                 dx, dy, dval = diamond_result
                 screen_x, screen_y = self.client_to_screen(dx, dy)
-                self.double_click_at(screen_x, screen_y)
-                time.sleep(1.0)
+                self.double_click_at(screen_x, screen_y, token)
+                if not self.interruptible_wait(1.0, token): return
                 bg_pop = self.capture_background(self.hwnd)
                 if bg_pop is not None:
                     at_x, at_y = self.get_region_ranges(self.all_trunk_search_region, w_img, h_img, (0.0, 1.0), (0.0, 1.0))
@@ -896,11 +954,13 @@ class MacroWorker(QThread):
                     if btn_all and btn_all[0] is not None:
                         ax, ay, aval = btn_all
                         win32api.SetCursorPos(self.client_to_screen(ax, ay))
-                        time.sleep(0.1)
+                        if not self.interruptible_wait(0.1, token): return
                         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-                        time.sleep(0.05)
+                        if not self.interruptible_wait(0.05, token):
+                            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                            return
                         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                        time.sleep(0.5)
+                        if not self.interruptible_wait(0.5, token): return
                         bg_confirm = self.capture_background(self.hwnd)
                         if bg_confirm is not None:
                             ct_x, ct_y = self.get_region_ranges(self.confirm_trunk_search_region, w_img, h_img, (0.0, 1.0), (0.0, 1.0))
@@ -908,17 +968,21 @@ class MacroWorker(QThread):
                             if btn_conf and btn_conf[0] is not None:
                                 cx, cy, cval = btn_conf
                                 win32api.SetCursorPos(self.client_to_screen(cx, cy))
-                                time.sleep(0.1)
+                                if not self.interruptible_wait(0.1, token): return
                                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-                                time.sleep(0.05)
+                                if not self.interruptible_wait(0.05, token):
+                                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                                    return
                                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                                time.sleep(1.5)
+                                if not self.interruptible_wait(1.5, token): return
         send_key_direct("esc")
-        time.sleep(1.0)
+        if not self.interruptible_wait(1.0, token): return
         press_key_hold("e")
-        time.sleep(1.5)
+        if not self.interruptible_wait(1.5, token):
+            release_key_hold("e")
+            return
         release_key_hold("e")
-        time.sleep(1.5)
+        if not self.interruptible_wait(1.5, token): return
         bg_final = self.capture_background(self.hwnd)
         if bg_final is not None:
             # [แก้ไข] ค้นหาปุ่มเริ่มงานทั่วหน้าจอ ป้องกันตั้งพิกัดคลาดเคลื่อน
@@ -926,13 +990,15 @@ class MacroWorker(QThread):
             if btn_result and btn_result[0] is not None:
                 bx, by, _ = btn_result
                 win32api.SetCursorPos(self.client_to_screen(bx, by))
-                time.sleep(0.1)
+                if not self.interruptible_wait(0.1, token): return
                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-                time.sleep(0.05)
+                if not self.interruptible_wait(0.05, token):
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                    return
                 win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                time.sleep(2.0)
+                if not self.interruptible_wait(2.0, token): return
         send_key_direct("t")
-        time.sleep(1.0)
+        if not self.interruptible_wait(1.0, token): return
         if orig_pos:
             try: win32api.SetCursorPos(orig_pos)
             except: pass
@@ -1074,7 +1140,7 @@ class MacroWorker(QThread):
             self.diamond_preview_signal.emit(slot_img, val, confirmed, status)
             if confirmed and not self.diamond_full_notified:
                 self.diamond_full_notified = True
-                self.is_running = False
+                self.set_running(False)
                 self.running_state_signal.emit(False)
                 self.log_signal.emit("[ระบบเพชร] ตรวจพบ 40/40 หยุดฟาร์มโหมดไม่มีรถ")
                 self.send_diamond_full_webhook()
@@ -1090,6 +1156,11 @@ class MacroWorker(QThread):
     def run(self):
         while not self.is_exiting:
             try:
+                # Paused means truly idle: no capture, scan, timers, or input.
+                if not self.is_running:
+                    time.sleep(0.1)
+                    continue
+                token = self.action_token()
                 if not self.hwnd:
                     self.hwnd = self.get_window_hwnd(WINDOW_NAME)
                     if self.hwnd: self.connection_signal.emit(True, win32gui.GetWindowText(self.hwnd))
@@ -1115,9 +1186,6 @@ class MacroWorker(QThread):
                     self.force_store_test = False
                     self.execute_store_diamonds_sequence()
                     continue
-                if not self.is_running:
-                    time.sleep(0.5)
-                    continue
                 match_status = {}
                 h_img, w_img, _ = bg_img.shape
                 all_x, all_y = self.get_region_ranges(self.all_search_region, w_img, h_img, (0.35, 0.65), (0.35, 0.75))
@@ -1127,7 +1195,7 @@ class MacroWorker(QThread):
                     match_status["all"] = (True, val_all)
                     self.match_signal.emit(match_status)
                     self.bg_click(self.hwnd, x_all, y_all)
-                    time.sleep(0.5)
+                    if not self.interruptible_wait(0.5, token): continue
                     bg_img_after = self.capture_background(self.hwnd)
                     if bg_img_after is not None:
                         conf_x, conf_y = self.get_region_ranges(self.confirm_search_region, w_img, h_img, (0.35, 0.65), (0.35, 0.75))
@@ -1137,7 +1205,7 @@ class MacroWorker(QThread):
                             match_status["confirm"] = (True, val_conf)
                             self.match_signal.emit(match_status)
                             self.bg_click(self.hwnd, x_conf, y_conf)
-                            time.sleep(self.delays["confirm"])
+                            if not self.interruptible_wait(self.delays["confirm"], token): continue
                     continue
                 else:
                     match_status["all"], match_status["confirm"] = (False, all_result[2] if all_result else 0.0), (False, 0.0)
@@ -1149,7 +1217,7 @@ class MacroWorker(QThread):
                     match_status["destroy"] = (True, val)
                     self.match_signal.emit(match_status)
                     self.bg_click(self.hwnd, x, y)
-                    time.sleep(self.delays["destroy"])
+                    if not self.interruptible_wait(self.delays["destroy"], token): continue
                     continue
                 else:
                     match_status["destroy"] = (False, destroy_result[2] if destroy_result else 0.0)
@@ -1189,7 +1257,7 @@ class MacroWorker(QThread):
                         if is_matched:
                             self.match_signal.emit(match_status)
                             self.bg_right_click(self.hwnd, ore_x, ore_y)
-                            time.sleep(self.delays["gold"])
+                            if not self.interruptible_wait(self.delays["gold"], token): continue
                             self.gold_preview_signal.emit(preview_ore_img, preview_text_img, preview_ore_score, preview_text_score, preview_target_thresh)
                             continue
                     else:
@@ -1210,7 +1278,7 @@ class MacroWorker(QThread):
                         self.check_and_run_timed_diamond_store()
 
                 self.match_signal.emit(match_status)
-                time.sleep(0.3)
+                self.interruptible_wait(0.3, token)
             except Exception as error:
                 message = f"{type(error).__name__}: {error}"
                 now = time.time()
@@ -1222,6 +1290,7 @@ class MacroWorker(QThread):
 
     def stop(self):
         self.is_exiting = True
+        self.set_running(False)
         self.quit()
         self.wait()
 
@@ -1653,7 +1722,7 @@ class MainWindow(QMainWindow):
         except Exception: pass
 
     def toggle_macro(self):
-        self.worker.is_running = not self.worker.is_running
+        self.worker.set_running(not self.worker.is_running)
         if self.worker.is_running:
             self.worker.reset_diamond_cycle()
             self.start_btn.setText("หยุดทำงานบอทชั่วคราว [F9]")
@@ -1666,7 +1735,7 @@ class MainWindow(QMainWindow):
 
     @Slot(bool)
     def on_worker_running_state(self, running):
-        self.worker.is_running = running
+        self.worker.set_running(running)
         self.start_btn.setText(
             "หยุดทำงานบอทชั่วคราว [F9]" if running else "เริ่มทำงานบอท [F9]"
         )
