@@ -20,8 +20,18 @@ PACKAGE_ASSET = "FiveM-Farming-Package.zip"
 APP_EXE = "FiveM-Farming-Macro.exe"
 APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "FiveM-Farming")
 VERSION_FILE = os.path.join(APP_DIR, ".installed-version.json")
+LOG_FILE = os.path.join(APP_DIR, "launcher.log")
 USER_AGENT = "FiveM-Farming-Launcher/1.0"
 HTTPS_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+
+def write_log(message):
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as stream:
+            stream.write(f"[{__import__('datetime').datetime.now():%Y-%m-%d %H:%M:%S}] {message}\n")
+    except Exception:
+        pass
 
 
 def request_bytes(url, timeout=30):
@@ -32,8 +42,14 @@ def request_bytes(url, timeout=30):
             "Accept": "application/vnd.github+json",
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout, context=HTTPS_CONTEXT) as response:
-        return response.read()
+    last_error = None
+    for context in (ssl.create_default_context(), HTTPS_CONTEXT):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+                return response.read()
+        except Exception as error:
+            last_error = error
+    raise last_error
 
 
 def sha256_file(path):
@@ -68,6 +84,7 @@ class UpdateWorker(QThread):
 
     def update_and_run(self):
         try:
+            write_log("Checking latest GitHub release")
             release = json.loads(request_bytes(RELEASE_API, timeout=15).decode("utf-8"))
             assets = {asset["name"]: asset["browser_download_url"] for asset in release.get("assets", [])}
             if MANIFEST_ASSET not in assets or PACKAGE_ASSET not in assets:
@@ -138,6 +155,7 @@ class UpdateWorker(QThread):
             )
             self.ready.emit(os.path.join(APP_DIR, APP_EXE))
         except Exception as error:
+            write_log(f"Update failed: {type(error).__name__}: {error}")
             self.failed.emit(str(error))
 
     def run(self):
@@ -147,6 +165,8 @@ class UpdateWorker(QThread):
 class LauncherWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        os.makedirs(APP_DIR, exist_ok=True)
+        write_log("Launcher started")
         self.setWindowTitle("FiveM Farming Launcher")
         self.setFixedSize(500, 220)
         self.setStyleSheet(
@@ -193,8 +213,13 @@ class LauncherWindow(QMainWindow):
         self.close()
 
     def launch_app(self, app_path):
-        subprocess.Popen([app_path], cwd=APP_DIR)
-        self.close()
+        try:
+            write_log(f"Starting macro: {app_path}")
+            subprocess.Popen([app_path], cwd=APP_DIR)
+            self.close()
+        except Exception as error:
+            write_log(f"Macro start failed: {type(error).__name__}: {error}")
+            self.show_failure(str(error))
 
 
 if __name__ == "__main__":

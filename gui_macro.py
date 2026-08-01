@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QSlider, QTextEdit, QFrame, QGridLayout, 
     QGroupBox, QSystemTrayIcon, QMenu, QCheckBox, QTabWidget, QScrollArea,
-    QComboBox, QLineEdit
+    QComboBox, QLineEdit, QProgressBar
 )
 from PySide6.QtGui import QIcon, QAction, QColor, QFont, QPainter, QPen, QPixmap, QImage
 
@@ -196,6 +196,7 @@ class MacroWorker(QThread):
         self.run_generation = 0
         self.last_cancelled_generation = -1
         self.hwnd = None
+        self.target_hwnd = None
         self.thresholds = {"gold": 0.84, "destroy": 0.75, "all": 0.65, "confirm": 0.65}
         self.delays = {"gold": 0.8, "destroy": 0.8, "all": 0.8, "confirm": 8.0}
         self.hud_region = None
@@ -299,6 +300,9 @@ class MacroWorker(QThread):
                 self.diamond_interval_minutes = max(1, int(value))
             elif key == "webhook":
                 self.discord_webhook_url = str(value or "").strip()
+        elif config_type == "window":
+            self.target_hwnd = int(value) if value else None
+            self.hwnd = self.target_hwnd
         elif config_type == "ref_res": self.reference_resolution = value
         elif config_type == "template_refs": self.template_reference_sizes = value or {}
 
@@ -394,7 +398,10 @@ class MacroWorker(QThread):
                 if keyword.lower() in title.lower():
                     if any(x in title.lower() for x in ["chrome", "firefox", "edge", "visual studio", "cmd.exe", "command prompt", "remotee"]): return
                     hwnd_list.append((hwnd, title, 5))
-        win32gui.EnumWindows(callback, None)
+        try:
+            win32gui.EnumWindows(callback, None)
+        except Exception:
+            pass
         hwnd_list.sort(key=lambda x: x[2], reverse=True)
         return hwnd_list[0][0] if hwnd_list else None
 
@@ -1174,7 +1181,10 @@ class MacroWorker(QThread):
                     continue
                 token = self.action_token()
                 if not self.hwnd:
-                    self.hwnd = self.get_window_hwnd(WINDOW_NAME)
+                    if self.target_hwnd and win32gui.IsWindow(self.target_hwnd):
+                        self.hwnd = self.target_hwnd
+                    else:
+                        self.hwnd = self.get_window_hwnd(WINDOW_NAME)
                     if self.hwnd: self.connection_signal.emit(True, win32gui.GetWindowText(self.hwnd))
                     else:
                         self.connection_signal.emit(False, "กำลังค้นหาหน้าต่างเกม FiveM...")
@@ -1312,34 +1322,62 @@ class MacroWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.session_started_at = None
+        self.last_dashboard_activity = "พร้อมเริ่มทำงาน"
         self.config_path = get_writable_path("config.json")
         self.private_settings_path = get_writable_path("private-settings.json")
         self.load_config()
         self.load_private_settings()
         self.setWindowTitle("ระบบมาโครทิ้งทองอัตโนมัติ (Background)")
-        self.resize(760, 580)
+        self.resize(1080, 680)
+        self.setMinimumSize(960, 620)
+        self.setMaximumSize(1180, 760)
         self.setStyleSheet("""
-            QMainWindow { background-color: #f8fafc; }
-            QWidget { color: #334155; font-family: 'Segoe UI', sans-serif; }
-            QGroupBox { border: 1px solid #cbd5e1; border-radius: 8px; margin-top: 15px; font-weight: bold; font-size: 13px; color: #475569; background-color: #ffffff; }
+            QMainWindow { background-color: #0b0d12; }
+            QWidget { color: #e7eaf0; font-family: 'Segoe UI', sans-serif; }
+            QGroupBox { border: 1px solid #252a35; border-radius: 12px; margin-top: 15px; font-weight: bold; font-size: 13px; color: #c3c8d2; background-color: #14171e; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-            QFrame#Card { background-color: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 8px; }
+            QFrame#Card, QFrame#DashboardCard { background-color: #151820; border: 1px solid #262b36; border-radius: 16px; }
+            QFrame#TechPanel { background-color: #101319; border: 1px solid #20242d; border-radius: 16px; }
+            QFrame#Sidebar { background-color: #12151b; border: 1px solid #20242d; border-radius: 16px; }
+            QLabel#Logo { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #42e8b4,stop:1 #17b985); color: #07110e; border-radius: 11px; font-size: 18px; font-weight: 900; padding: 8px; }
+            QLabel#Section { color: #737a89; font-size: 10px; font-weight: 700; }
+            QLabel#IconBadge { background-color: #1d2825; color: #4ce5b5; border-radius: 8px; font-size: 16px; font-weight: 700; padding: 6px; }
             QLabel { font-size: 12px; }
-            QLabel#Title { font-size: 18px; font-weight: bold; color: #1e293b; }
-            QPushButton { background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; font-weight: bold; font-size: 11px; padding: 6px 10px; }
-            QPushButton:hover { background-color: #f1f5f9; border: 1px solid #94a3b8; }
-            QPushButton#StartBtn { background-color: #0d9488; border: none; border-radius: 6px; color: white; font-weight: bold; font-size: 14px; padding: 12px; }
-            QPushButton#StartBtn:hover { background-color: #0f766e; }
-            QPushButton#StartBtn[running="true"] { background-color: #ef4444; }
+            QLabel#Title { font-size: 18px; font-weight: bold; color: #eef8f4; }
+            QLabel#Metric { font-size: 25px; font-weight: 700; color: #f5f7fb; }
+            QLabel#Muted { color: #8c93a3; font-size: 11px; }
+            QLabel#Accent { color: #46dfaf; font-size: 11px; font-weight: 700; }
+            QPushButton { background-color: #1a1e27; border: 1px solid #2b303c; border-radius: 9px; font-weight: 600; font-size: 11px; padding: 8px 12px; }
+            QPushButton:hover { background-color: #202630; border: 1px solid #3a4250; }
+            QPushButton:checked { background-color: #193329; border: 1px solid #38c99d; color: #57e3b8; }
+            QPushButton#NavButton { text-align: left; background: transparent; border: none; color: #9299a8; padding: 10px 12px; font-size: 12px; }
+            QPushButton#NavButton:hover { background-color: #1b1f27; color: #eef1f6; }
+            QPushButton#NavButton:checked { background-color: #1b2d28; color: #53dfb5; border: none; }
+            QPushButton#StartBtn { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #33d6a5,stop:1 #19b984); border: none; border-radius: 11px; color: #06120e; font-weight: 700; font-size: 14px; padding: 13px; }
+            QPushButton#StartBtn:hover { background-color: #4be1b5; }
+            QPushButton#StartBtn[running="true"] { background-color: #ff4f5e; color: white; }
+            QPushButton#EmergencyStop { background-color: #24181c; border: 1px solid #553038; color: #ff7b87; font-size: 13px; padding: 12px; }
+            QComboBox, QLineEdit { background-color: #101319; border: 1px solid #2b303b; border-radius: 9px; padding: 8px; color: #e2e5ec; }
+            QProgressBar { background-color: #101713; border: none; border-radius: 2px; height: 4px; text-align: center; color: transparent; }
+            QProgressBar::chunk { background-color: #25e6a4; border-radius: 2px; }
+            QTabWidget::pane { border: 1px solid #25332e; background: #0a0f0d; border-radius: 8px; }
+            QTabBar::tab { background: #0d1311; color: #82928c; padding: 8px 14px; border: 1px solid #25332e; }
+            QTabBar::tab:selected { color: #25e6a4; border-bottom: 2px solid #25e6a4; }
             QSlider::groove:horizontal { border: 1px solid #cbd5e1; height: 5px; background: #e2e8f0; border-radius: 2px; }
-            QSlider::handle:horizontal { background: #0d9488; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }
-            QSlider::sub-page:horizontal { background: #0d9488; border-radius: 2px; }
-            QTextEdit#Log { background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px; font-family: 'Consolas', monospace; font-size: 11px; }
+            QSlider::handle:horizontal { background: #25e6a4; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }
+            QSlider::sub-page:horizontal { background: #25e6a4; border-radius: 2px; }
+            QTextEdit#Log { background-color: #080d0b; border: 1px solid #25332e; border-radius: 7px; color: #b8c9c2; font-family: 'Consolas', monospace; font-size: 11px; }
+            QScrollArea { border: none; background: transparent; }
         """)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
+        self.app_shell = QVBoxLayout(central_widget)
+        self.app_shell.setContentsMargins(14, 14, 14, 14)
+        self.app_shell.setSpacing(10)
+        self.advanced_widget = QWidget()
+        main_layout = QVBoxLayout(self.advanced_widget)
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(12)
 
@@ -1647,9 +1685,276 @@ class MainWindow(QMainWindow):
         self.worker.running_state_signal.connect(self.on_worker_running_state)
         self.worker.start()
 
+        self.dashboard_widget = self.build_dashboard()
+        self.app_shell.addWidget(self.dashboard_widget)
+        self.advanced_window = QMainWindow(self)
+        self.advanced_window.setWindowTitle("What U • การตั้งค่าขั้นสูง")
+        self.advanced_window.setCentralWidget(self.advanced_widget)
+        self.advanced_window.resize(980, 720)
+        self.dashboard_timer = QTimer(self)
+        self.dashboard_timer.timeout.connect(self.update_dashboard_clock)
+        self.dashboard_timer.start(1000)
+        self.refresh_fivem_windows()
+
         keyboard.add_hotkey("F9", self.toggle_macro)
         keyboard.add_hotkey("F10", self.close)
         self.write_log("ยินดีต้อนรับสู่แผงควบคุมระบบฟาร์มทิ้งทองอัตโนมัติ (Background)")
+
+    def dashboard_card(self, icon, title, value="-", detail=""):
+        card = QFrame()
+        card.setObjectName("DashboardCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(17, 15, 17, 15)
+        top = QHBoxLayout()
+        badge = QLabel(icon)
+        badge.setObjectName("IconBadge")
+        badge.setFixedSize(35, 35)
+        badge.setAlignment(Qt.AlignCenter)
+        caption = QLabel(title)
+        caption.setStyleSheet("font-size: 12px; font-weight: 600; color: #b8bec9;")
+        top.addWidget(badge)
+        top.addSpacing(7)
+        top.addWidget(caption)
+        top.addStretch()
+        metric = QLabel(value)
+        metric.setObjectName("Metric")
+        hint = QLabel(detail)
+        hint.setObjectName("Muted")
+        layout.addLayout(top)
+        layout.addSpacing(10)
+        layout.addWidget(metric)
+        layout.addStretch()
+        layout.addWidget(hint)
+        return card, metric
+
+    def build_dashboard(self):
+        root = QWidget()
+        shell = QHBoxLayout(root)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(12)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(175)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(14, 16, 14, 16)
+        side.setSpacing(7)
+        logo_row = QHBoxLayout()
+        logo = QLabel("W")
+        logo.setObjectName("Logo")
+        logo.setFixedSize(42, 42)
+        logo.setAlignment(Qt.AlignCenter)
+        logo_text = QVBoxLayout()
+        app_name = QLabel("What U")
+        app_name.setStyleSheet("font-size: 14px; font-weight: 700;")
+        app_sub = QLabel("Farm Manager")
+        app_sub.setObjectName("Muted")
+        logo_text.addWidget(app_name)
+        logo_text.addWidget(app_sub)
+        logo_row.addWidget(logo)
+        logo_row.addLayout(logo_text)
+        side.addLayout(logo_row)
+        side.addSpacing(20)
+        menu_title = QLabel("เมนูหลัก")
+        menu_title.setObjectName("Section")
+        side.addWidget(menu_title)
+        for icon, label, active in (
+            ("⌂", "ภาพรวม", True),
+            ("◇", "ระบบฟาร์ม", False),
+            ("◷", "ประวัติการทำงาน", False),
+            ("⚙", "ตั้งค่าขั้นสูง", False),
+        ):
+            button = QPushButton(f"{icon}    {label}")
+            button.setObjectName("NavButton")
+            button.setMinimumHeight(39)
+            button.setCheckable(True)
+            button.setChecked(active)
+            if label == "ตั้งค่าขั้นสูง":
+                button.clicked.connect(self.open_advanced_window)
+            side.addWidget(button)
+        side.addStretch()
+        version = QLabel("เวอร์ชัน 1.1.2  •  Stable")
+        version.setObjectName("Muted")
+        side.addWidget(version)
+        shell.addWidget(sidebar)
+
+        content = QFrame()
+        content.setObjectName("TechPanel")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+        top = QHBoxLayout()
+        brand = QVBoxLayout()
+        eyebrow = QLabel("แดชบอร์ด")
+        eyebrow.setObjectName("Section")
+        title = QLabel("ยินดีต้อนรับกลับ")
+        title.setObjectName("Title")
+        subtitle = QLabel("ติดตามและควบคุมการฟาร์มของเครื่องนี้ได้จากที่เดียว")
+        subtitle.setObjectName("Muted")
+        brand.addWidget(eyebrow)
+        brand.addWidget(title)
+        brand.addWidget(subtitle)
+        top.addLayout(brand)
+        top.addStretch()
+        self.dashboard_state = QLabel("●  ระบบพร้อมทำงาน")
+        self.dashboard_state.setObjectName("Accent")
+        top.addWidget(self.dashboard_state)
+        layout.addLayout(top)
+
+        target_panel = QFrame()
+        target_panel.setObjectName("TechPanel")
+        window_row = QHBoxLayout()
+        window_row.setContentsMargins(12, 8, 12, 8)
+        window_label = QLabel("หน้าต่าง FiveM")
+        window_label.setObjectName("Section")
+        self.window_combo = QComboBox()
+        self.window_combo.currentIndexChanged.connect(self.on_target_window_changed)
+        refresh_btn = QPushButton("↻  ค้นหาใหม่")
+        refresh_btn.clicked.connect(self.refresh_fivem_windows)
+        window_row.addWidget(window_label)
+        window_row.addSpacing(8)
+        window_row.addWidget(self.window_combo, 1)
+        window_row.addWidget(refresh_btn)
+        target_panel.setLayout(window_row)
+        layout.addWidget(target_panel)
+
+        metrics = QHBoxLayout()
+        uptime_card, self.uptime_metric = self.dashboard_card("◷", "เวลาฟาร์มรอบนี้", "00:00:00", "เริ่มนับเมื่อกดเริ่มทำงาน")
+        diamond_card, self.diamond_countdown_metric = self.dashboard_card("◇", "เก็บเพชรครั้งถัดไป", "--:--", "นับถอยหลังอัตโนมัติ")
+        mode_card, self.mode_metric = self.dashboard_card("▣", "โหมดจัดการเพชร", "มีรถ • 20 นาที", "เปลี่ยนโหมดได้ด้านล่าง")
+        for card in (uptime_card, diamond_card, mode_card):
+            metrics.addWidget(card, 1)
+        layout.addLayout(metrics)
+
+        lower = QHBoxLayout()
+        control_panel = QFrame()
+        control_panel.setObjectName("DashboardCard")
+        control_box = QVBoxLayout(control_panel)
+        control_title = QLabel("ฟังก์ชันอัตโนมัติ")
+        control_title.setObjectName("Section")
+        control_box.addWidget(control_title)
+        controls = QHBoxLayout()
+        self.dashboard_feed_btn = QPushButton("อาหาร / น้ำ")
+        self.dashboard_feed_btn.setCheckable(True)
+        self.dashboard_feed_btn.setChecked(self.auto_feed_cb.isChecked())
+        self.dashboard_feed_btn.toggled.connect(self.auto_feed_cb.setChecked)
+        self.dashboard_store_btn = QPushButton("จัดการเพชร")
+        self.dashboard_store_btn.setCheckable(True)
+        self.dashboard_store_btn.setChecked(self.auto_store_cb.isChecked())
+        self.dashboard_store_btn.toggled.connect(self.auto_store_cb.setChecked)
+        self.dashboard_mode_combo = QComboBox()
+        self.dashboard_mode_combo.addItem("มีรถ • เก็บทุก 20 นาที", "car_timer")
+        self.dashboard_mode_combo.addItem("ไม่มีรถ • เต็ม 40/40 แล้วหยุด", "no_car_full")
+        self.dashboard_mode_combo.setCurrentIndex(max(0, self.dashboard_mode_combo.findData(self.diamond_mode)))
+        self.dashboard_mode_combo.currentIndexChanged.connect(self.on_dashboard_mode_changed)
+        controls.addWidget(self.dashboard_feed_btn)
+        controls.addWidget(self.dashboard_store_btn)
+        control_box.addLayout(controls)
+        control_box.addWidget(self.dashboard_mode_combo)
+
+        activity_panel = QFrame()
+        activity_panel.setObjectName("DashboardCard")
+        activity_box = QVBoxLayout(activity_panel)
+        activity_head = QHBoxLayout()
+        activity_title = QLabel("กิจกรรมล่าสุด")
+        activity_title.setObjectName("Section")
+        live_badge = QLabel("● สด")
+        live_badge.setObjectName("Accent")
+        activity_head.addWidget(activity_title)
+        activity_head.addStretch()
+        activity_head.addWidget(live_badge)
+        self.activity_metric = QLabel("ระบบพร้อมรับคำสั่ง")
+        self.activity_metric.setWordWrap(True)
+        self.activity_metric.setStyleSheet("font-size: 14px; font-weight: 600; color: #dce8e3;")
+        activity_hint = QLabel("อัปเดตตามการทำงานของโปรแกรม")
+        activity_hint.setObjectName("Muted")
+        activity_box.addLayout(activity_head)
+        activity_box.addStretch()
+        activity_box.addWidget(self.activity_metric)
+        activity_box.addWidget(activity_hint)
+        lower.addWidget(control_panel, 2)
+        lower.addWidget(activity_panel, 3)
+        layout.addLayout(lower)
+
+        action_row = QHBoxLayout()
+        self.dashboard_start_btn = QPushButton("▶  เริ่มทำงาน  [F9]")
+        self.dashboard_start_btn.setObjectName("StartBtn")
+        self.dashboard_start_btn.setProperty("running", "false")
+        self.dashboard_start_btn.clicked.connect(self.toggle_macro)
+        stop_btn = QPushButton("■  หยุดทันที")
+        stop_btn.setObjectName("EmergencyStop")
+        stop_btn.clicked.connect(self.stop_macro_now)
+        action_row.addWidget(self.dashboard_start_btn, 3)
+        action_row.addWidget(stop_btn, 1)
+        layout.addLayout(action_row)
+        shell.addWidget(content, 1)
+        return root
+
+    def open_advanced_window(self):
+        self.advanced_window.show()
+        self.advanced_window.raise_()
+        self.advanced_window.activateWindow()
+
+    def stop_macro_now(self):
+        if self.worker.is_running:
+            self.toggle_macro()
+        else:
+            self.worker.set_running(False)
+            self.update_dashboard_running_state(False)
+
+    def refresh_fivem_windows(self):
+        if not hasattr(self, "window_combo"):
+            return
+        selected = self.window_combo.currentData()
+        windows = []
+        def callback(hwnd, _extra):
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            title = win32gui.GetWindowText(hwnd)
+            class_name = win32gui.GetClassName(hwnd)
+            if class_name == "grcWindow" or "cfx.re" in title.lower() or "fivem" in title.lower():
+                windows.append((hwnd, title or "FiveM"))
+        try:
+            win32gui.EnumWindows(callback, None)
+        except Exception:
+            windows = []
+        self.window_combo.blockSignals(True)
+        self.window_combo.clear()
+        for index, (hwnd, title) in enumerate(windows, 1):
+            self.window_combo.addItem(f"หน้าต่าง {index}  •  {title[:55]}", hwnd)
+        if not windows:
+            self.window_combo.addItem("ยังไม่พบหน้าต่าง FiveM", None)
+        elif selected:
+            index = self.window_combo.findData(selected)
+            if index >= 0:
+                self.window_combo.setCurrentIndex(index)
+        self.window_combo.blockSignals(False)
+        self.on_target_window_changed()
+
+    def on_target_window_changed(self, _index=None):
+        if hasattr(self, "window_combo"):
+            self.worker.set_config(self.window_combo.currentData(), "window", None)
+
+    def on_dashboard_mode_changed(self, _index=None):
+        value = self.dashboard_mode_combo.currentData()
+        index = self.diamond_mode_combo.findData(value)
+        if index >= 0:
+            self.diamond_mode_combo.setCurrentIndex(index)
+        self.update_dashboard_clock()
+
+    def update_dashboard_clock(self):
+        if not hasattr(self, "uptime_metric"):
+            return
+        if self.worker.is_running and self.session_started_at:
+            seconds = max(0, int(time.time() - self.session_started_at))
+            self.uptime_metric.setText(f"{seconds // 3600:02d}:{(seconds // 60) % 60:02d}:{seconds % 60:02d}")
+        if self.diamond_mode == "car_timer":
+            remaining = max(0, int(self.diamond_interval_minutes * 60 - (time.time() - self.worker.diamond_cycle_started_at)))
+            self.diamond_countdown_metric.setText(f"{remaining // 60:02d}:{remaining % 60:02d}" if self.worker.is_running else "--:--")
+            self.mode_metric.setText(f"มีรถ • ทุก {self.diamond_interval_minutes} นาที")
+        else:
+            self.diamond_countdown_metric.setText("รอ 40/40")
+            self.mode_metric.setText("ไม่มีรถ • เต็มแล้วหยุด")
 
     def sync_worker_config(self):
         for k, v in self.thresholds.items(): self.worker.set_config(k, "threshold", v)
@@ -1681,14 +1986,22 @@ class MainWindow(QMainWindow):
         self.log_console.append(f"{time.strftime('[%H:%M:%S]')} {text}")
         sb = self.log_console.verticalScrollBar()
         sb.setValue(sb.maximum())
+        if hasattr(self, "activity_metric"):
+            clean = str(text).replace("\n", " ").strip()
+            self.activity_metric.setText(clean[:38] + ("…" if len(clean) > 38 else ""))
+            self.activity_metric.setToolTip(clean)
 
     @Slot(bool, str)
     def update_connection_status(self, connected, title):
         if connected:
             self.status_dot.setStyleSheet("color: #22c55e; font-size: 10px;")
+            if hasattr(self, "dashboard_state"):
+                self.dashboard_state.setText("●  เชื่อมต่อ FiveM แล้ว")
             self.status_text.setText(f"เชื่อมต่อแล้ว: {title[:25]}...")
         else:
             self.status_dot.setStyleSheet("color: #eab308; font-size: 10px;")
+            if hasattr(self, "dashboard_state"):
+                self.dashboard_state.setText("●  รอหน้าต่าง FiveM")
             self.status_text.setText(title)
 
     @Slot(dict)
@@ -1736,14 +2049,28 @@ class MainWindow(QMainWindow):
     def toggle_macro(self):
         self.worker.set_running(not self.worker.is_running)
         if self.worker.is_running:
+            self.session_started_at = time.time()
             self.worker.reset_diamond_cycle()
             self.start_btn.setText("หยุดทำงานบอทชั่วคราว [F9]")
             self.start_btn.setProperty("running", "true")
         else:
+            self.session_started_at = None
             self.start_btn.setText("เริ่มทำงานบอท [F9]")
             self.start_btn.setProperty("running", "false")
         self.start_btn.style().unpolish(self.start_btn)
         self.start_btn.style().polish(self.start_btn)
+        self.update_dashboard_running_state(self.worker.is_running)
+
+    def update_dashboard_running_state(self, running):
+        if not hasattr(self, "dashboard_start_btn"):
+            return
+        self.dashboard_start_btn.setText("■  หยุดทำงานทันที  [F9]" if running else "▶  เริ่มทำงาน  [F9]")
+        self.dashboard_start_btn.setProperty("running", "true" if running else "false")
+        self.dashboard_start_btn.style().unpolish(self.dashboard_start_btn)
+        self.dashboard_start_btn.style().polish(self.dashboard_start_btn)
+        self.dashboard_state.setText("●  กำลังฟาร์ม" if running else "●  หยุดแล้ว")
+        if not running:
+            self.diamond_countdown_metric.setText("--:--")
 
     @Slot(bool)
     def on_worker_running_state(self, running):
@@ -1754,9 +2081,16 @@ class MainWindow(QMainWindow):
         self.start_btn.setProperty("running", "true" if running else "false")
         self.start_btn.style().unpolish(self.start_btn)
         self.start_btn.style().polish(self.start_btn)
+        if running and self.session_started_at is None:
+            self.session_started_at = time.time()
+        if not running:
+            self.session_started_at = None
+        self.update_dashboard_running_state(running)
 
     def closeEvent(self, event):
         keyboard.unhook_all_hotkeys()
+        if hasattr(self, "advanced_window"):
+            self.advanced_window.close()
         self.worker.stop()
         event.accept()
 
