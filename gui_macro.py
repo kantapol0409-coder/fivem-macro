@@ -1891,7 +1891,7 @@ class MainWindow(QMainWindow):
                 button.clicked.connect(self.open_advanced_window)
             side.addWidget(button)
         side.addStretch()
-        version = QLabel("เวอร์ชัน 1.1.6  •  Stable")
+        version = QLabel("เวอร์ชัน 1.1.7  •  Stable")
         version.setObjectName("Muted")
         side.addWidget(version)
         shell.addWidget(sidebar)
