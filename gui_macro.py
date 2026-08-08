@@ -197,6 +197,7 @@ class MacroWorker(QThread):
         self.last_cancelled_generation = -1
         self.hwnd = None
         self.target_hwnd = None
+        self.target_window_title = ""
         self.thresholds = {"gold": 0.84, "destroy": 0.75, "all": 0.65, "confirm": 0.65}
         self.delays = {"gold": 0.8, "destroy": 0.8, "all": 0.8, "confirm": 8.0}
         self.hud_region = None
@@ -232,11 +233,18 @@ class MacroWorker(QThread):
         self.last_runtime_error = ""
         self.last_runtime_error_time = 0.0
         self.last_gold_debug_capture_time = 0.0
+        self.discard_cooldown_active = False
+        self.discard_cooldown_seen = False
+        self.discard_cooldown_absent_frames = 0
+        self.discard_cooldown_started_at = 0.0
 
     def set_running(self, running):
         """Change run state and immediately invalidate in-flight actions."""
         self.run_generation += 1
         self.is_running = bool(running)
+        self.discard_cooldown_active = False
+        self.discard_cooldown_seen = False
+        self.discard_cooldown_absent_frames = 0
         if not self.is_running:
             self.force_feed_test = False
             self.force_store_test = False
@@ -301,7 +309,11 @@ class MacroWorker(QThread):
             elif key == "webhook":
                 self.discord_webhook_url = str(value or "").strip()
         elif config_type == "window":
-            self.target_hwnd = int(value) if value else None
+            # `key` carries the HWND (matching every other set_config call);
+            # `value` carries its title.  The old code read `value` as HWND,
+            # but the caller passed None there, silently clearing selection.
+            self.target_hwnd = int(key) if key else None
+            self.target_window_title = str(value or "").strip()
             self.hwnd = self.target_hwnd
         elif config_type == "ref_res": self.reference_resolution = value
         elif config_type == "template_refs": self.template_reference_sizes = value or {}
@@ -404,6 +416,31 @@ class MacroWorker(QThread):
             pass
         hwnd_list.sort(key=lambda x: x[2], reverse=True)
         return hwnd_list[0][0] if hwnd_list else None
+
+    def find_game_window_by_title(self, expected_title):
+        """Resolve a real FiveM HWND from the title selected in the UI."""
+        expected = str(expected_title or "").strip()
+        if not expected:
+            return None
+        exact, partial = [], []
+        def callback(hwnd, _extra):
+            try:
+                if not win32gui.IsWindowVisible(hwnd):
+                    return
+                if win32gui.GetClassName(hwnd) != "grcWindow":
+                    return
+                title = win32gui.GetWindowText(hwnd).strip()
+                if title == expected:
+                    exact.append(hwnd)
+                elif expected.lower() in title.lower() or title.lower() in expected.lower():
+                    partial.append(hwnd)
+            except Exception:
+                return
+        try:
+            win32gui.EnumWindows(callback, None)
+        except Exception:
+            return None
+        return exact[0] if exact else (partial[0] if partial else None)
 
     def capture_background(self, hwnd):
         geometry = self.get_client_geometry(hwnd)
@@ -576,6 +613,40 @@ class MacroWorker(QThread):
             return (None, None, max(0.0, best_val))
         except Exception:
             return None
+
+    def find_discard_cooldown(self, bg_img):
+        """Detect the static What U gold popup without depending on its number."""
+        try:
+            path = self.resolve_template_path("templates/discard_cooldown.png")
+            source = cv2.imread(path)
+            if source is None or source.shape[0] < 180 or source.shape[1] < 175:
+                return (None, None, 0.0)
+            # Use the lower popup's icon ring only; the 30 value is variable.
+            template = source[123:182, 110:175]
+            h, w = bg_img.shape[:2]
+            search = bg_img[int(h * 0.55):h, int(w * 0.55):w]
+            if search.size == 0:
+                return (None, None, 0.0)
+            sx, sy = self.get_template_scale(path, w, h)
+            best_score, best_loc, best_size = -1.0, None, None
+            for nearby in (1.0, 0.95, 1.05, 0.90, 1.10):
+                tw = max(8, int(round(template.shape[1] * sx * nearby)))
+                th = max(8, int(round(template.shape[0] * sy * nearby)))
+                if search.shape[1] < tw or search.shape[0] < th:
+                    continue
+                scaled = cv2.resize(template, (tw, th), interpolation=cv2.INTER_AREA if nearby < 1 else cv2.INTER_CUBIC)
+                result = cv2.matchTemplate(search, scaled, cv2.TM_CCOEFF_NORMED)
+                _, score, _, loc = cv2.minMaxLoc(result)
+                if score > best_score:
+                    best_score, best_loc, best_size = score, loc, (tw, th)
+            if best_loc is None:
+                return (None, None, 0.0)
+            if best_score >= 0.76:
+                tw, th = best_size
+                return (int(w * 0.55) + best_loc[0] + tw // 2, int(h * 0.55) + best_loc[1] + th // 2, best_score)
+            return (None, None, max(0.0, best_score))
+        except Exception:
+            return (None, None, 0.0)
 
     def find_gold_count(self, bg_img, ore_x, ore_y, threshold):
         """Require the numerator "30" directly above the detected gold ore."""
@@ -1180,12 +1251,31 @@ class MacroWorker(QThread):
                     time.sleep(0.1)
                     continue
                 token = self.action_token()
-                if not self.hwnd:
-                    if self.target_hwnd and win32gui.IsWindow(self.target_hwnd):
-                        self.hwnd = self.target_hwnd
+                if self.target_window_title:
+                    resolved_hwnd = self.find_game_window_by_title(self.target_window_title)
+                    if resolved_hwnd:
+                        self.target_hwnd = resolved_hwnd
                     else:
-                        self.hwnd = self.get_window_hwnd(WINDOW_NAME)
-                    if self.hwnd: self.connection_signal.emit(True, win32gui.GetWindowText(self.hwnd))
+                        self.hwnd = None
+                        self.connection_signal.emit(False, f"ไม่พบหน้าต่างที่เลือก: {self.target_window_title}")
+                        time.sleep(1.0)
+                        continue
+                # A manually selected FiveM window is authoritative.  Never
+                # fall back to another FiveM instance while that selection is
+                # present; otherwise What U can silently capture Tale Town.
+                if self.target_hwnd:
+                    if not win32gui.IsWindow(self.target_hwnd):
+                        self.hwnd = None
+                        self.connection_signal.emit(False, "หน้าต่าง FiveM ที่เลือกถูกปิดแล้ว กรุณากดค้นหาใหม่")
+                        time.sleep(1.0)
+                        continue
+                    if self.hwnd != self.target_hwnd:
+                        self.hwnd = self.target_hwnd
+                    self.connection_signal.emit(True, win32gui.GetWindowText(self.hwnd))
+                elif not self.hwnd:
+                    self.hwnd = self.get_window_hwnd(WINDOW_NAME)
+                    if self.hwnd:
+                        self.connection_signal.emit(True, win32gui.GetWindowText(self.hwnd))
                     else:
                         self.connection_signal.emit(False, "กำลังค้นหาหน้าต่างเกม FiveM...")
                         time.sleep(2)
@@ -1199,6 +1289,29 @@ class MacroWorker(QThread):
                     time.sleep(1.5)
                     continue
                 self.save_latest_gold_debug_capture(bg_img)
+                if self.discard_cooldown_active:
+                    cooldown = self.find_discard_cooldown(bg_img)
+                    elapsed = time.time() - self.discard_cooldown_started_at
+                    if cooldown[0] is not None:
+                        if not self.discard_cooldown_seen:
+                            self.log_signal.emit(f"[ระบบทิ้งทอง] พบสถานะคูลดาวน์ {cooldown[2] * 100:.1f}% — พักการสแกน")
+                        self.discard_cooldown_seen = True
+                        self.discard_cooldown_absent_frames = 0
+                        self.interruptible_wait(0.25, token)
+                        continue
+                    if elapsed < 1.2:
+                        self.interruptible_wait(0.20, token)
+                        continue
+                    self.discard_cooldown_absent_frames += 1
+                    release = (
+                        (self.discard_cooldown_seen and self.discard_cooldown_absent_frames >= 2)
+                        or (not self.discard_cooldown_seen and elapsed >= 3.0)
+                    )
+                    if not release:
+                        self.interruptible_wait(0.20, token)
+                        continue
+                    self.discard_cooldown_active = False
+                    self.log_signal.emit("[ระบบทิ้งทอง] คูลดาวน์หายแล้ว — กลับมาสแกนได้")
                 if self.hud_region: self.process_hud_preview(bg_img)
                 if self.force_feed_test:
                     self.force_feed_test = False
@@ -1227,7 +1340,11 @@ class MacroWorker(QThread):
                             match_status["confirm"] = (True, val_conf)
                             self.match_signal.emit(match_status)
                             self.bg_click(self.hwnd, x_conf, y_conf)
-                            if not self.interruptible_wait(self.delays["confirm"], token): continue
+                            self.discard_cooldown_active = True
+                            self.discard_cooldown_seen = False
+                            self.discard_cooldown_absent_frames = 0
+                            self.discard_cooldown_started_at = time.time()
+                            if not self.interruptible_wait(0.35, token): continue
                     continue
                 else:
                     match_status["all"], match_status["confirm"] = (False, all_result[2] if all_result else 0.0), (False, 0.0)
@@ -1691,6 +1808,7 @@ class MainWindow(QMainWindow):
         self.advanced_window.setWindowTitle("What U • การตั้งค่าขั้นสูง")
         self.advanced_window.setCentralWidget(self.advanced_widget)
         self.advanced_window.resize(980, 720)
+        self.restore_saved_window_geometries()
         self.dashboard_timer = QTimer(self)
         self.dashboard_timer.timeout.connect(self.update_dashboard_clock)
         self.dashboard_timer.start(1000)
@@ -1773,7 +1891,7 @@ class MainWindow(QMainWindow):
                 button.clicked.connect(self.open_advanced_window)
             side.addWidget(button)
         side.addStretch()
-        version = QLabel("เวอร์ชัน 1.1.2  •  Stable")
+        version = QLabel("เวอร์ชัน 1.1.6  •  Stable")
         version.setObjectName("Muted")
         side.addWidget(version)
         shell.addWidget(sidebar)
@@ -1895,6 +2013,38 @@ class MainWindow(QMainWindow):
         self.advanced_window.raise_()
         self.advanced_window.activateWindow()
 
+    @staticmethod
+    def _restore_window_geometry(window, saved_geometry):
+        """Restore a saved window rectangle while keeping it on a live screen."""
+        if not isinstance(saved_geometry, (list, tuple)) or len(saved_geometry) != 4:
+            return
+        try:
+            x, y, width, height = (int(value) for value in saved_geometry)
+            width = max(window.minimumWidth(), min(width, window.maximumWidth()))
+            height = max(window.minimumHeight(), min(height, window.maximumHeight()))
+            candidate = QRect(x, y, width, height)
+            screens = QApplication.screens()
+            if screens and not any(
+                screen.availableGeometry().intersects(candidate) for screen in screens
+            ):
+                available = QApplication.primaryScreen().availableGeometry()
+                x = available.x() + max(0, (available.width() - width) // 2)
+                y = available.y() + max(0, (available.height() - height) // 2)
+            window.setGeometry(x, y, width, height)
+        except (TypeError, ValueError, OverflowError):
+            return
+
+    def restore_saved_window_geometries(self):
+        self._restore_window_geometry(self, self.main_window_geometry)
+        self._restore_window_geometry(
+            self.advanced_window, self.advanced_window_geometry
+        )
+
+    @staticmethod
+    def _window_geometry_as_list(window):
+        geometry = window.geometry()
+        return [geometry.x(), geometry.y(), geometry.width(), geometry.height()]
+
     def stop_macro_now(self):
         if self.worker.is_running:
             self.toggle_macro()
@@ -1912,7 +2062,10 @@ class MainWindow(QMainWindow):
                 return
             title = win32gui.GetWindowText(hwnd)
             class_name = win32gui.GetClassName(hwnd)
-            if class_name == "grcWindow" or "cfx.re" in title.lower() or "fivem" in title.lower():
+            # Only real FiveM game windows.  The old title-based fallback also
+            # listed this macro's own windows because their titles contain
+            # "FiveM", which could send captures to the wrong target.
+            if class_name == "grcWindow":
                 windows.append((hwnd, title or "FiveM"))
         try:
             win32gui.EnumWindows(callback, None)
@@ -1933,7 +2086,14 @@ class MainWindow(QMainWindow):
 
     def on_target_window_changed(self, _index=None):
         if hasattr(self, "window_combo"):
-            self.worker.set_config(self.window_combo.currentData(), "window", None)
+            hwnd = self.window_combo.currentData()
+            title = ""
+            try:
+                if hwnd and win32gui.IsWindow(hwnd):
+                    title = win32gui.GetWindowText(hwnd)
+            except Exception:
+                title = ""
+            self.worker.set_config(hwnd, "window", title)
 
     def on_dashboard_mode_changed(self, _index=None):
         value = self.dashboard_mode_combo.currentData()
@@ -2047,6 +2207,10 @@ class MainWindow(QMainWindow):
         except Exception: pass
 
     def toggle_macro(self):
+        # Re-apply the visible dropdown selection at the exact moment Start is
+        # pressed, so a stale HWND from another FiveM instance cannot survive.
+        if not self.worker.is_running:
+            self.on_target_window_changed()
         self.worker.set_running(not self.worker.is_running)
         if self.worker.is_running:
             self.session_started_at = time.time()
@@ -2088,6 +2252,12 @@ class MainWindow(QMainWindow):
         self.update_dashboard_running_state(running)
 
     def closeEvent(self, event):
+        self.main_window_geometry = self._window_geometry_as_list(self)
+        if hasattr(self, "advanced_window"):
+            self.advanced_window_geometry = self._window_geometry_as_list(
+                self.advanced_window
+            )
+        self.save_config()
         keyboard.unhook_all_hotkeys()
         if hasattr(self, "advanced_window"):
             self.advanced_window.close()
@@ -2140,6 +2310,8 @@ class MainWindow(QMainWindow):
         self.discord_webhook_url = ""
         self.reference_resolution = None
         self.template_reference_sizes = {}
+        self.main_window_geometry = None
+        self.advanced_window_geometry = None
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
@@ -2168,6 +2340,8 @@ class MainWindow(QMainWindow):
                     self.diamond_interval_minutes = int(data.get("diamond_interval_minutes", 20))
                     self.reference_resolution = data.get("reference_resolution", None)
                     self.template_reference_sizes = data.get("template_reference_sizes", {})
+                    self.main_window_geometry = data.get("main_window_geometry")
+                    self.advanced_window_geometry = data.get("advanced_window_geometry")
             except Exception: pass
 
     def save_config(self):
@@ -2190,7 +2364,9 @@ class MainWindow(QMainWindow):
                 "diamond_mode": self.diamond_mode,
                 "diamond_interval_minutes": self.diamond_interval_minutes,
                 "reference_resolution": self.reference_resolution,
-                "template_reference_sizes": self.template_reference_sizes
+                "template_reference_sizes": self.template_reference_sizes,
+                "main_window_geometry": self.main_window_geometry,
+                "advanced_window_geometry": self.advanced_window_geometry
             }
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
